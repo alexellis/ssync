@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 func main() {
 	// Define the flag for watch mode
 	watch := flag.Bool("watch", true, "Enable continuous sync (default: true)")
-	changes := flag.String("changes", "write,remove", "Changes to watch for - chmod, write, remove (default: write, remove)")
+	changes := flag.String("changes", "write,remove,chmod,rename", "Changes to watch for - chmod, write, remove (default: write, remove)")
 	compressVar := flag.Bool("compress", true, "Enable compression (default: true)")
 	verboseVar := flag.Bool("verbose", true, "Enable verbose output (default: true)")
 
@@ -215,18 +216,27 @@ func startWatcher(source, destination string, exclusions, changeList []string, c
 	select {}
 }
 func isWatchedEvent(event fsnotify.Event, changeList []string) bool {
+
 	for _, changeType := range changeList {
 		switch strings.ToLower(changeType) {
 		case "write":
-			if event.Op&fsnotify.Write == fsnotify.Write {
+			if event.Op == fsnotify.Write {
 				return true
 			}
 		case "remove":
-			if event.Op&fsnotify.Remove == fsnotify.Remove {
+			if event.Op == fsnotify.Remove {
 				return true
 			}
 		case "chmod":
-			if event.Op&fsnotify.Chmod == fsnotify.Chmod {
+			if event.Op == fsnotify.Chmod {
+				return true
+			}
+		case "create":
+			if event.Op == fsnotify.Create {
+				return true
+			}
+		case "rename":
+			if event.Op == fsnotify.Rename {
 				return true
 			}
 		}
@@ -246,6 +256,8 @@ func isExcluded(path string, exclusions []string) bool {
 		fmt.Printf("Error: Unable to make path relative: %v\n", err)
 		return false
 	}
+
+	log.Printf("relPath: %s, cwd: %s", relPath, cwd)
 
 	// Match the normalized path against exclusions
 	for _, pattern := range exclusions {
