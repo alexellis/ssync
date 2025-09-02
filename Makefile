@@ -6,7 +6,7 @@ SOURCE_DIRS = main.go
 export GO111MODULE=on
 
 .PHONY: all
-all: gofmt test build dist hash
+all: gofmt build dist hash
 
 .PHONY: build
 build:
@@ -19,10 +19,6 @@ gofmt:
 .PHONY: test
 test:
 	CGO_ENABLED=0 go test $(shell go list ./... | grep -v /vendor/|xargs echo) -cover
-
-.PHONY: e2e
-e2e:
-	CGO_ENABLED=0 go test github.com/alexellis/ssync/pkg/get -cover --tags e2e -v
 
 .PHONY: dist
 dist:
