@@ -12,18 +12,18 @@ Sync code between two machines in the same relative directory, i.e. your GOPATH.
 
 Imagine you're working on your Linux desktop:
 
-I'm working on changes in the arkade repo, but I'm about to leave for a trip with my Mac, or maybe I'm going to work from a cafe for the afternoon.
+I'm working on changes in the ssync repo, but I'm about to leave for a trip with my Mac, or maybe I'm going to work from a cafe for the afternoon.
 
 I don't want to push the branch remote, because it's not ready - or it's a mess. Since it's a public repo, maybe I don't actually want to publish those kinds of temporary changes.
 
 ```bash
-~/go/src/github.com/alexellis/arkade $
+~/go/src/github.com/alexellis/ssync $
 ```
 
 On my workstation, before I leave, I run:
 
 ```bash
-~/go/src/github.com/alexellis/arkade $ ssync ae-mba13 --watch=false
+~/go/src/github.com/alexellis/ssync $ ssync ae-mba13 --watch=false
 ```
 
 This then runs an `rsync` from my workstation to my Mac.
