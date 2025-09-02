@@ -2,7 +2,7 @@ Version := $(shell git describe --tags --dirty)
 GitCommit := $(shell git rev-parse HEAD)
 LDFLAGS := "-s -w -X github.com/alexellis/ssync/pkg.Version=$(Version) -X github.com/alexellis/ssync/pkg.GitCommit=$(GitCommit)"
 PLATFORM := $(shell ./hack/platform-tag.sh)
-SOURCE_DIRS = cmd pkg main.go
+SOURCE_DIRS = main.go
 export GO111MODULE=on
 
 .PHONY: all
