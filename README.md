@@ -32,13 +32,25 @@ This then runs an `rsync` from my workstation to my Mac.
 
 Now I'm working on my Mac, but I can't compile the code because it requires Linux, and the binary is too large to scp.
 
-So, I simply `cd` to the directory and run `ssync --watch=true`
+The large binary is named "inletsctl" and can be in the current folder, or in `/bin`:
+
+So I create a .ssyncignore file:
+
+```
+/bin/
+/inletsctl
+```
+
+Then I simply `cd` to the directory and run `ssync --watch=true` in a spare terminal.
+
+Every time I save a file in my editor - like vim or VSCode, an increment `rsync` will take place of any changed files.
 
 ## Features
 
 * Automatic watch built-in with fsnotify, use `--watch=false` to turn off
 * Ignore files and patterns like `.git` and `bin/` via `.ssyncignore`
 * Concise syntax: `ssync mac-mini` or `ssync alex@rpi.local`
+* Debouncing when files are changed frequently
 
 Relies on `rsync` for incremental file transfers, and `ssh` for remote access.
 
