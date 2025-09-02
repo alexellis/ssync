@@ -3,6 +3,39 @@ ssync
 
 Sync code between two machines in the same relative directory, i.e. your GOPATH.
 
+## Use-cases:
+
+1. I'm going to continue work on another machine (one-off sync)
+2. I'm editing locally, but need a Linux machine to build on (run a continual sync with fsnotify)
+
+**Here's how to transfer my work to pick it up later:**
+
+Imagine you're working on your Linux desktop:
+
+I'm working on changes in the arkade repo, but I'm about to leave for a trip with my Mac, or maybe I'm going to work from a cafe for the afternoon.
+
+I don't want to push the branch remote, because it's not ready - or it's a mess. Since it's a public repo, maybe I don't actually want to publish those kinds of temporary changes.
+
+```bash
+~/go/src/github.com/alexellis/arkade $
+```
+
+On my workstation, before I leave, I run:
+
+```bash
+~/go/src/github.com/alexellis/arkade $ ssync ae-mba13 --watch=false
+```
+
+This then runs an `rsync` from my workstation to my Mac.
+
+**Editing locally, building/deploying remotely**
+
+Now I'm working on my Mac, but I can't compile the code because it requires Linux, and the binary is too large to scp.
+
+So, I simply `cd` to the directory and run `ssync --watch=true`
+
+## Features
+
 * Automatic watch built-in with fsnotify, use `--watch=false` to turn off
 * Ignore files and patterns like `.git` and `bin/` via `.ssyncignore`
 * Concise syntax: `ssync mac-mini` or `ssync alex@rpi.local`
