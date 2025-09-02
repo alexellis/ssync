@@ -34,7 +34,14 @@ func main() {
 	flag.Parse()
 
 	if len(flag.Args()) != 1 {
-		fmt.Println("Usage: syncdir [-watch=false] [-changes \"write,delete\"] <remote-host>")
+		fmt.Println(`ssync by Alex Ellis, Copyright 2025
+
+Usage: ssync [-watch=false] [-changes "write,delete"] <remote-host>
+
+To ignore large files i.e. binaries, create a .ssyncignore file
+
+Learn more https://github.com/alexellis/ssync
+`)
 		os.Exit(1)
 	}
 
