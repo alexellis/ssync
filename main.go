@@ -14,16 +14,35 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+type syncEndpoint struct {
+	name      string
+	rsyncPath string
+	isLocal   bool
+	localPath string
+}
+
 func main() {
 	// Define the flag for watch mode
 	watch := flag.Bool("watch", true, "Enable continuous sync (default: true)")
 	changes := flag.String("changes", "write,remove,chmod,rename", "Changes to watch for - chmod, write, remove (default: write, remove)")
 	compressVar := flag.Bool("compress", true, "Enable compression (default: true)")
+	deleteVar := flag.Bool("delete", false, "Mirror destination by deleting extraneous files (default: false)")
+	progressVar := flag.Bool("progress", true, "Enable progress output (default: true)")
 	verboseVar := flag.Bool("verbose", true, "Enable verbose output (default: true)")
 
 	compress := true
 	if compressVar != nil {
 		compress = *compressVar
+	}
+
+	progress := true
+	if progressVar != nil {
+		progress = *progressVar
+	}
+
+	delete := false
+	if deleteVar != nil {
+		delete = *deleteVar
 	}
 
 	verbose := true
@@ -33,19 +52,42 @@ func main() {
 
 	flag.Parse()
 
-	if len(flag.Args()) != 1 {
-		fmt.Println(`ssync by Alex Ellis, Copyright 2025
+	args := flag.Args()
+	if len(args) == 0 || len(args) > 2 {
+		fmt.Print(`ssync by Alex Ellis, Copyright 2025
 
-Usage: ssync [-watch=false] [-changes "write,delete"] <remote-host>
+Usage: ssync [-watch=false] [-changes "write,delete"] [-compress=false] [-progress=false] [-delete]
+       ssync <destination>
+       ssync . <destination>
+       ssync <destination> .
+
+Use "." to represent the current directory. Example flows:
+  ssync bq         # same as "ssync . bq" (push local -> remote)
+  ssync . bq       # explicit push local -> remote
+  ssync bq .       # pull remote -> local
+
+Use "--delete" to mirror the destination (removes files missing from the source)
 
 To ignore large files i.e. binaries, create a .ssyncignore file
+
+[Push mode] The remote folder is created automatically if it doesn't exist
+already
+
+[Pull mode] You need to create the folder locally, and cd into it
+before running ssync.
 
 Learn more https://github.com/alexellis/ssync
 `)
 		os.Exit(1)
 	}
 
-	remoteHost := flag.Args()[0]
+	sourceArg := "."
+	destArg := args[0]
+
+	if len(args) == 2 {
+		sourceArg = args[0]
+		destArg = args[1]
+	}
 
 	// Get the current working directory
 	cwd, err := os.Getwd()
@@ -68,34 +110,110 @@ Learn more https://github.com/alexellis/ssync
 		os.Exit(1)
 	}
 
-	// Define the target path on the remote machine
-	remotePath := fmt.Sprintf("%s:%s/%s", remoteHost, "~", relativePath)
+	sourceEndpoint, err := newEndpoint(sourceArg, cwd, relativePath)
+	if err != nil {
+		fmt.Printf("Error: Unable to determine source: %v\n", err)
+		os.Exit(1)
+	}
+
+	destEndpoint, err := newEndpoint(destArg, cwd, relativePath)
+	if err != nil {
+		fmt.Printf("Error: Unable to determine destination: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !sourceEndpoint.isLocal && !destEndpoint.isLocal {
+		fmt.Println("Error: Either the source or destination must be the local machine.")
+		os.Exit(1)
+	}
 
 	// Load exclusions from the .ssyncignore file
-	exclusions, err := loadIgnoreFile(cwd)
+	ignoreBase := cwd
+	if sourceEndpoint.isLocal {
+		ignoreBase = sourceEndpoint.localPath
+	} else if destEndpoint.isLocal {
+		ignoreBase = destEndpoint.localPath
+	}
+
+	exclusions, err := loadIgnoreFile(ignoreBase)
 	if err != nil {
 		fmt.Printf("Error: Unable to load .ssyncignore file: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Perform an initial sync
-	fmt.Printf("ssync - Copyright Alex Ellis 2024\n\n%s\n=>\n%s\n\n", cwd, remotePath)
+	fmt.Printf("ssync - Copyright Alex Ellis 2024\n\n%s\n=>\n%s\n\n", sourceEndpoint.name, destEndpoint.name)
 
-	runRsync(cwd, remotePath, exclusions, compress, verbose)
+	runRsync(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, compress, verbose, progress, delete)
 
 	// Check if we should watch for changes
 	if *watch {
-		fmt.Printf("\nWatching %s for changes...\n", cwd)
+		if sourceEndpoint.isLocal {
+			fmt.Printf("\nWatching %s for changes...\n", sourceEndpoint.localPath)
 
-		changeList := strings.Split(*changes, ",")
-		for i := 0; i < len(changeList); i++ {
-			changeList[i] = strings.ToUpper(strings.TrimSpace(changeList[i]))
+			changeList := strings.Split(*changes, ",")
+			for i := 0; i < len(changeList); i++ {
+				changeList[i] = strings.ToUpper(strings.TrimSpace(changeList[i]))
+			}
+
+			startWatcher(sourceEndpoint.localPath, destEndpoint.rsyncPath, exclusions, changeList, compress, verbose, progress, delete)
+		} else {
+			fmt.Println("Watch mode is only available when syncing from the local machine. Skipping watcher.")
 		}
-
-		startWatcher(cwd, remotePath, exclusions, changeList, compress, verbose)
 	} else {
 		fmt.Println("Sync completed. Watch mode disabled.")
 	}
+}
+
+func newEndpoint(arg, cwd, relativePath string) (syncEndpoint, error) {
+	cleanCwd := filepath.Clean(cwd)
+
+	if arg == "" || arg == "." || strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../") || filepath.IsAbs(arg) {
+		localPath := cleanCwd
+		if arg != "" && arg != "." {
+			absPath, err := filepath.Abs(arg)
+			if err != nil {
+				return syncEndpoint{}, err
+			}
+			localPath = filepath.Clean(absPath)
+		}
+
+		return syncEndpoint{
+			name:      localPath,
+			rsyncPath: localPath,
+			isLocal:   true,
+			localPath: localPath,
+		}, nil
+	}
+
+	remotePath := formatRemotePath(arg, relativePath)
+
+	return syncEndpoint{
+		name:      remotePath,
+		rsyncPath: remotePath,
+		isLocal:   false,
+	}, nil
+}
+
+func formatRemotePath(host, relativePath string) string {
+	trimmed := relativePath
+	if trimmed == "" {
+		trimmed = "."
+	}
+
+	trimmed = strings.TrimPrefix(trimmed, "./")
+	trimmed = strings.TrimPrefix(trimmed, "/")
+
+	remoteBase := "~"
+	if trimmed == "." || trimmed == "" {
+		return fmt.Sprintf("%s:%s/", host, remoteBase)
+	}
+
+	if trimmed != "" {
+		remoteBase = fmt.Sprintf("%s/%s", remoteBase, trimmed)
+	}
+
+	return fmt.Sprintf("%s:%s", host, remoteBase)
 }
 
 func loadIgnoreFile(dir string) ([]string, error) {
@@ -131,7 +249,7 @@ func loadIgnoreFile(dir string) ([]string, error) {
 
 	return exclusions, nil
 }
-func runRsync(source, destination string, exclusions []string, compress, verbose bool) {
+func runRsync(source, destination string, exclusions []string, compress, verbose, progress, delete bool) {
 	rsyncArgs := []string{
 		"-a", // Archive mode (recursive), verbose, compress
 	}
@@ -142,6 +260,14 @@ func runRsync(source, destination string, exclusions []string, compress, verbose
 
 	if compress {
 		rsyncArgs[0] += "z"
+	}
+
+	if progress {
+		rsyncArgs = append(rsyncArgs, "--progress")
+	}
+
+	if delete {
+		rsyncArgs = append(rsyncArgs, "--delete")
 	}
 
 	// Add exclusions to the rsync arguments
@@ -165,7 +291,7 @@ func runRsync(source, destination string, exclusions []string, compress, verbose
 		fmt.Println("Sync completed successfully.")
 	}
 }
-func startWatcher(source, destination string, exclusions, changeList []string, compress, verbose bool) {
+func startWatcher(source, destination string, exclusions, changeList []string, compress, verbose, progress, delete bool) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Printf("Error: Unable to create file watcher: %v\n", err)
@@ -210,7 +336,7 @@ func startWatcher(source, destination string, exclusions, changeList []string, c
 				}
 
 				syncTimer = time.AfterFunc(debounceDelay, func() {
-					runRsync(source, destination, exclusions, compress, verbose)
+					runRsync(source, destination, exclusions, compress, verbose, progress, delete)
 				})
 
 			case err := <-watcher.Errors:

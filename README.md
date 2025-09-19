@@ -3,6 +3,25 @@ ssync
 
 Sync code between two machines in the same relative directory, i.e. your GOPATH.
 
+Examples (bq is a remote Linux host, `.` is your local machine i.e. perhaps a MacBook)
+
+All paths are relative to `cwd` on the machine where `ssync` is run.
+
+```bash
+# Copy local pwd (arkade) to bq at the same relative path
+# ~/go/src/github.com/alexellis/arkade
+ssync bq
+
+# Same as above, but in long form
+ssync . bq
+
+# If the folder doesn't exist yet, create it and cd to it
+# mkdir -p ~/go/src/github.com/alexellis/arkade
+# cd ~/go/src/github.com/alexellis/arkade
+# "ls" will show an empty directory, now run the pull:
+ssync bq .
+```
+
 ## Use-cases:
 
 1. I'm going to continue work on another machine (one-off sync)
@@ -55,4 +74,3 @@ Every time I save a file in my editor - like vim or VSCode, an increment `rsync`
 Relies on `rsync` for incremental file transfers, and `ssh` for remote access.
 
 Works wherever you have SSH: port-forwarding on your router, inlets-pro TCP tunnels, VPNs, Tailscale, Wireguard, etc
-
