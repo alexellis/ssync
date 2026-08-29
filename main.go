@@ -23,12 +23,18 @@ type syncEndpoint struct {
 
 func main() {
 	// Define the flag for watch mode
-	watch := flag.Bool("watch", true, "Enable continuous sync (default: true)")
+	watch := flag.Bool("watch", true, "Enable fsnotify watching in push mode (default: true)")
 	changes := flag.String("changes", "write,remove,chmod,rename", "Changes to watch for - chmod, write, remove (default: write, remove)")
 	compressVar := flag.Bool("compress", true, "Enable compression (default: true)")
 	deleteVar := flag.Bool("delete", false, "Mirror destination by deleting extraneous files (default: false)")
 	progressVar := flag.Bool("progress", true, "Enable progress output (default: true)")
 	verboseVar := flag.Bool("verbose", true, "Enable verbose output (default: true)")
+	pollVar := flag.String("poll", "", "In pull mode, re-sync every interval (e.g. 5s). Off by default.")
+	remoteNotify := flag.Bool("remote-notify", false, "In pull mode, stream inotify events from the remote to trigger syncs (default: false)")
+	flag.BoolVar(remoteNotify, "R", false, "Shorthand for --remote-notify")
+
+	// Allow flags after positional args, e.g. "ssync bq . --poll=5s"
+	os.Args = reorderFlags(os.Args)
 
 	compress := true
 	if compressVar != nil {
@@ -56,7 +62,7 @@ func main() {
 	if len(args) == 0 || len(args) > 2 {
 		fmt.Print(`ssync by Alex Ellis, Copyright 2025
 
-Usage: ssync [-watch=false] [-changes "write,delete"] [-compress=false] [-progress=false] [-delete]
+Usage: ssync [-watch=false] [-changes "write,delete"] [-compress=false] [-progress=false] [-delete] [-R] [--poll=5s]
        ssync <destination>
        ssync . <destination>
        ssync <destination> .
@@ -71,10 +77,14 @@ Use "--delete" to mirror the destination (removes files missing from the source)
 To ignore large files i.e. binaries, create a .ssyncignore file
 
 [Push mode] The remote folder is created automatically if it doesn't exist
-already
+already. Watch mode (default on) uses fsnotify on the local folder.
 
 [Pull mode] You need to create the folder locally, and cd into it
-before running ssync.
+before running ssync. By default a pull is a one-shot sync. To keep
+syncing live, use:
+  -R  / --remote-notify=true   stream inotify events from the remote
+                               (needs inotify-tools installed there)
+  --poll=5s                    re-sync on a timer instead
 
 Learn more https://github.com/alexellis/ssync
 `)
@@ -146,23 +156,73 @@ Learn more https://github.com/alexellis/ssync
 
 	runRsync(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, compress, verbose, progress, delete)
 
-	// Check if we should watch for changes
-	if *watch {
-		if sourceEndpoint.isLocal {
-			fmt.Printf("\nWatching %s for changes...\n", sourceEndpoint.localPath)
-
+	// Continuous sync
+	if sourceEndpoint.isLocal {
+		if *watch {
 			changeList := strings.Split(*changes, ",")
 			for i := 0; i < len(changeList); i++ {
 				changeList[i] = strings.ToUpper(strings.TrimSpace(changeList[i]))
 			}
 
+			fmt.Printf("\nWatching %s for changes...\n", sourceEndpoint.localPath)
 			startWatcher(sourceEndpoint.localPath, destEndpoint.rsyncPath, exclusions, changeList, compress, verbose, progress, delete)
 		} else {
-			fmt.Println("Watch mode is only available when syncing from the local machine. Skipping watcher.")
+			fmt.Println("Sync completed. Watch mode disabled.")
 		}
+	} else if *remoteNotify {
+		changeList := strings.Split(*changes, ",")
+		for i := 0; i < len(changeList); i++ {
+			changeList[i] = strings.ToUpper(strings.TrimSpace(changeList[i]))
+		}
+
+		if err := startRemoteWatcher(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, changeList, compress, verbose, progress, delete); err != nil {
+			fmt.Printf("Remote notify unavailable: %v\n", err)
+			if *pollVar != "" {
+				interval := parsePollInterval(*pollVar)
+				fmt.Printf("Falling back to polling %s every %s...\n", sourceEndpoint.name, interval)
+				startPoller(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, interval, compress, verbose, progress, delete)
+			} else {
+				fmt.Println("Hint: install inotify-tools on the remote, or re-run with --poll=5s to poll instead.")
+			}
+		}
+	} else if *pollVar != "" {
+		interval := parsePollInterval(*pollVar)
+		fmt.Printf("\nPolling %s every %s (pull mode)...\n", sourceEndpoint.name, interval)
+		startPoller(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, interval, compress, verbose, progress, delete)
 	} else {
-		fmt.Println("Sync completed. Watch mode disabled.")
+		fmt.Println("Sync completed. (Use -R for remote-notify or --poll for continuous pull.)")
 	}
+}
+
+func parsePollInterval(pollVar string) time.Duration {
+	interval, err := time.ParseDuration(pollVar)
+	if err != nil {
+		fmt.Printf("Error: invalid --poll interval %q: %v\n", pollVar, err)
+		os.Exit(1)
+	}
+	if interval <= 0 {
+		fmt.Printf("Error: --poll interval must be positive, got %s\n", pollVar)
+		os.Exit(1)
+	}
+	return interval
+}
+
+func reorderFlags(args []string) []string {
+	if len(args) < 2 {
+		return args
+	}
+
+	flags := []string{}
+	positional := []string{}
+	for _, arg := range args[1:] {
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+
+	return append(append([]string{args[0]}, flags...), positional...)
 }
 
 func newEndpoint(arg, cwd, relativePath string) (syncEndpoint, error) {
@@ -184,6 +244,20 @@ func newEndpoint(arg, cwd, relativePath string) (syncEndpoint, error) {
 			isLocal:   true,
 			localPath: localPath,
 		}, nil
+	}
+
+	// Remote endpoint. We don't support an explicit remote path (host:path)
+	// because the remote path is always derived from your local working
+	// directory. Catch the common mistake and explain the workaround.
+	if strings.Contains(arg, ":") {
+		host := strings.SplitN(arg, ":", 2)[0]
+		return syncEndpoint{}, fmt.Errorf(
+			"%q looks like a host:path, but ssync doesn't take an explicit remote path.\n"+
+				"It mirrors your local working directory to the same relative path on the remote.\n\n"+
+				"To sync that folder, cd into a local folder with the same name, then use the bare host:\n\n"+
+				"  cd <matching local folder>\n"+
+				"  ssync %s .\n",
+			arg, host)
 	}
 
 	remotePath := formatRemotePath(arg, relativePath)
@@ -347,6 +421,141 @@ func startWatcher(source, destination string, exclusions, changeList []string, c
 
 	// Keep the program running
 	select {}
+}
+func startPoller(source, destination string, exclusions []string, interval time.Duration, compress, verbose, progress, delete bool) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		runRsync(source, destination, exclusions, compress, verbose, progress, delete)
+	}
+}
+
+// startRemoteWatcher streams inotify events from the remote host over a
+// second SSH channel and triggers a debounced rsync pull on each change.
+// It blocks until the stream ends, returning an error if the remote does
+// not support inotifywait or the connection drops.
+func startRemoteWatcher(source, destination string, exclusions []string, changeList []string, compress, verbose, progress, delete bool) error {
+	host, remotePath, ok := strings.Cut(source, ":")
+	if !ok {
+		return fmt.Errorf("unexpected source %q", source)
+	}
+
+	fmt.Printf("\nWatching %s:%s for changes (remote inotify)...\n", host, remotePath)
+
+	cmd := exec.Command("ssh", host, remoteInotifyCommand(remotePath))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	accept := inotifyFlags(changeList)
+
+	var syncTimer *time.Timer
+	const debounceDelay = 2 * time.Second
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		flagsPart, path, ok := strings.Cut(line, "|")
+		if !ok {
+			continue
+		}
+
+		if !hasAcceptedFlag(strings.Split(flagsPart, ","), accept) {
+			continue
+		}
+
+		if isRemoteExcluded(path, exclusions) {
+			continue
+		}
+
+		fmt.Printf("[remote] %s\n", remoteDisplayName(path, remotePath))
+
+		if syncTimer != nil {
+			syncTimer.Stop()
+		}
+
+		syncTimer = time.AfterFunc(debounceDelay, func() {
+			runRsync(source, destination, exclusions, compress, verbose, progress, delete)
+		})
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("inotify stream ended: %v", err)
+	}
+	return fmt.Errorf("inotify stream closed")
+}
+
+func remoteInotifyCommand(path string) string {
+	quoted := `"` + strings.ReplaceAll(strings.ReplaceAll(path, `\`, `\\`), `"`, `\"`) + `"`
+	// Tilde does not expand inside quotes, so swap it for $HOME which does.
+	quoted = strings.Replace(quoted, `"~`, `"$HOME`, 1)
+	return fmt.Sprintf("inotifywait -m -r -q --format '%%e|%%w%%f' %s", quoted)
+}
+
+func inotifyFlags(changeList []string) map[string]bool {
+	accept := map[string]bool{}
+	for _, change := range changeList {
+		switch change {
+		case "WRITE":
+			accept["MODIFY"] = true
+			accept["CREATE"] = true
+		case "REMOVE":
+			accept["DELETE"] = true
+			accept["DELETE_SELF"] = true
+		case "RENAME":
+			accept["MOVED_TO"] = true
+			accept["MOVED_FROM"] = true
+		case "CHMOD":
+			accept["ATTRIB"] = true
+		case "CREATE":
+			accept["CREATE"] = true
+		}
+	}
+	return accept
+}
+
+func hasAcceptedFlag(flags []string, accept map[string]bool) bool {
+	for _, flag := range flags {
+		if accept[strings.TrimSpace(flag)] {
+			return true
+		}
+	}
+	return false
+}
+
+func isRemoteExcluded(path string, exclusions []string) bool {
+	base := filepath.Base(path)
+	for _, pattern := range exclusions {
+		if strings.Contains(pattern, "*") {
+			if matched, err := filepath.Match(pattern, base); err == nil && matched {
+				return true
+			}
+			continue
+		}
+		if base == pattern {
+			return true
+		}
+	}
+	return false
+}
+
+func remoteDisplayName(path, remotePath string) string {
+	rel := strings.TrimPrefix(remotePath, "~/")
+	if i := strings.LastIndex(path, rel); i >= 0 {
+		return strings.TrimPrefix(path[i+len(rel):], "/")
+	}
+	return path
 }
 func isWatchedEvent(event fsnotify.Event, changeList []string) bool {
 
