@@ -30,11 +30,13 @@ func main() {
 	progressVar := flag.Bool("progress", true, "Enable progress output (default: true)")
 	verboseVar := flag.Bool("verbose", true, "Enable verbose output (default: true)")
 	pollVar := flag.String("poll", "", "In pull mode, re-sync every interval (e.g. 5s). Off by default.")
-	remoteNotify := flag.Bool("remote-notify", false, "In pull mode, stream inotify events from the remote to trigger syncs (default: false)")
-	flag.BoolVar(remoteNotify, "R", false, "Shorthand for --remote-notify")
+	remoteNotify := flag.Bool("remote-notify", true, "In pull mode, stream inotify events from the remote to trigger syncs (default: true)")
+	flag.BoolVar(remoteNotify, "R", true, "Shorthand for --remote-notify")
 
 	// Allow flags after positional args, e.g. "ssync bq . --poll=5s"
 	os.Args = reorderFlags(os.Args)
+
+	flag.Parse()
 
 	compress := true
 	if compressVar != nil {
@@ -55,8 +57,6 @@ func main() {
 	if verboseVar != nil {
 		verbose = *verboseVar
 	}
-
-	flag.Parse()
 
 	args := flag.Args()
 	if len(args) == 0 || len(args) > 2 {
@@ -80,11 +80,11 @@ To ignore large files i.e. binaries, create a .ssyncignore file
 already. Watch mode (default on) uses fsnotify on the local folder.
 
 [Pull mode] You need to create the folder locally, and cd into it
-before running ssync. By default a pull is a one-shot sync. To keep
-syncing live, use:
-  -R  / --remote-notify=true   stream inotify events from the remote
-                               (needs inotify-tools installed there)
-  --poll=5s                    re-sync on a timer instead
+before running ssync. By default a pull watches the remote with
+inotify (-R / --remote-notify, needs inotify-tools installed there)
+and syncs live. Alternatives:
+  --poll=5s              re-sync on a timer instead of inotify
+  --remote-notify=false  one-shot sync, no watching
 
 Learn more https://github.com/alexellis/ssync
 `)
@@ -169,7 +169,11 @@ Learn more https://github.com/alexellis/ssync
 		} else {
 			fmt.Println("Sync completed. Watch mode disabled.")
 		}
-	} else if *remoteNotify {
+	} else if *watch && *pollVar != "" && !*remoteNotify {
+		interval := parsePollInterval(*pollVar)
+		fmt.Printf("\nPolling %s every %s (pull mode)...\n", sourceEndpoint.name, interval)
+		startPoller(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, interval, compress, verbose, progress, delete)
+	} else if *watch && *remoteNotify {
 		changeList := strings.Split(*changes, ",")
 		for i := 0; i < len(changeList); i++ {
 			changeList[i] = strings.ToUpper(strings.TrimSpace(changeList[i]))
@@ -183,14 +187,11 @@ Learn more https://github.com/alexellis/ssync
 				startPoller(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, interval, compress, verbose, progress, delete)
 			} else {
 				fmt.Println("Hint: install inotify-tools on the remote, or re-run with --poll=5s to poll instead.")
+				os.Exit(1)
 			}
 		}
-	} else if *pollVar != "" {
-		interval := parsePollInterval(*pollVar)
-		fmt.Printf("\nPolling %s every %s (pull mode)...\n", sourceEndpoint.name, interval)
-		startPoller(sourceEndpoint.rsyncPath, destEndpoint.rsyncPath, exclusions, interval, compress, verbose, progress, delete)
 	} else {
-		fmt.Println("Sync completed. (Use -R for remote-notify or --poll for continuous pull.)")
+		fmt.Println("Sync completed. Watch mode disabled.")
 	}
 }
 
