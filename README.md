@@ -35,22 +35,26 @@ remote. Use `--watch=false` for a one-off sync instead.
 
 **Pull (remote -> local)** - `ssync bq .`
 
-By default a pull is a one-shot sync. To keep it live, either:
+By default a pull watches the remote with `inotifywait` over a second
+SSH channel (`-R` / `--remote-notify`, on by default). When someone - or
+a CI job, or the other machine - changes a file there, a debounced
+`rsync` pulls it down. Requires `inotify-tools` on the remote:
+`sudo apt-get install inotify-tools`.
 
-* `-R` (or `--remote-notify=true`) - `ssync` opens a second SSH channel
-  running `inotifywait` on the remote folder and streams the events back.
-  When someone (or a CI job, or the other machine) changes a file there,
-  a debounced `rsync` pulls it down. Requires `inotify-tools` on the
-  remote: `sudo apt-get install inotify-tools`.
+Alternatives:
+
 * `--poll=5s` - no inotify needed, `ssync` simply re-runs the `rsync`
-  on a timer. Also the automatic fallback if `-R` can't start.
+  on a timer. Also the automatic fallback if the inotify stream can't
+  start.
+* `--remote-notify=false` (or `--watch=false`) - one-shot sync, no
+  watching.
 
 ```bash
 # Push and watch: edit locally, changes land on bq
 ssync bq
 
-# Pull and watch: changes on bq land locally, no polling
-ssync bq . -R
+# Pull and watch: changes on bq land locally (default, needs inotify-tools)
+ssync bq .
 
 # Pull on a timer instead
 ssync bq . --poll=5s
